@@ -1,0 +1,283 @@
+/*
+  Brush testing motor control
+  Iona Brockie, September 2014
+  Last updated: April 2015
+  
+  Input options:
+  1. set testspeed testtime (testspeed and testtime are positive whole numbers)
+  2. run
+  3. end
+  
+  How to use:
+  Use the serial monitor to set the desired motor speed and test time (input 1).
+  Turn the power supply on to about 10V.
+  Use the serial monitor to start the test (input 2).
+  Wait until the test is over, sending the estop command if necessary (input 3).
+  Copy and save the data from the serial monitor.
+  Repeat for all desired tests.
+  
+  Note:
+  The brushes are design for the motor to move CCW. This motor code treats those
+  voltage inputs as negative.
+  
+*/ 
+
+#include "DualMC33926MotorShield.h"
+#include "PID_v1.h"
+#define encoder0PinA 2
+#define encoder0PinB 3
+ 
+///////////////////////// Initialize variables ////////////////////////
+
+    boolean run = false;     // whether a test is running
+    
+    // time variables
+    double testspeed = 0;    // desired motor speed (rpm)
+    int testtime = 0;        // desired test length (seconds)
+    float starttime;         // time that test started (seconds)
+    float nowtime_s;         // current time (seconds)
+    float nowtime_ms;        // current time (milliseconds)
+    float countstarttime;    // time when encoder counting starts (milliseconds)
+    float rottime;           // time for one rotation (milliseconds)
+    
+    // voltage and speed variables
+    double voltage = 0;      // next desired motor "voltage" (-400 to 400)
+    double nowspeed = 0;     // current speed (rpm)
+    float speeddiff;         // desired speed - current speed (rpm)
+     
+    // communication variables
+    boolean newinfo = false; // whether there is new info from serial port
+    char character;          // holds a character from the serial port
+    String content = "";     // holds the string from the serial port
+    int spaceIndex;          // hold the index of the second space from a "set" command
+    String testspeedChar;    // holds the desired motor speed as a string
+    String testtimeChar;     // holds the desired test time as a string
+    
+    // output variables (first four should involve same number)
+    int savesecs[100]; 
+    int savemillis[100]; 
+    int savespeed[100];
+    float arraysize = 100;  
+    int arraynum = 0;  
+    
+    // quadrature encoder variables
+    volatile int count = 0;  // # of times encoder pins have changed value
+    
+    // running motor variables
+    DualMC33926MotorShield md;
+    
+    // set up PID
+    // PID(&Input, &Output, &Setpoint, Kp, Ki, Kd, Direction)
+    PID myPID(&nowspeed, &voltage, &testspeed, 15, 0, 0, REVERSE);
+
+//////////////////////////////// Setup ////////////////////////////////
+
+// the setup routine runs once when you press reset
+void setup() {      
+  
+    // set the two encoder pins as inputs
+    pinMode(encoder0PinA, INPUT); 
+    pinMode(encoder0PinB, INPUT); 
+    
+    // run interrupts 0 or 1 when there is a change in voltage on pin 2 or 3
+    attachInterrupt(0, doEncoderA, CHANGE); // encoder pin on interrupt 0 (pin 2)
+    attachInterrupt(1, doEncoderB, CHANGE); // encoder pin on interrupt 1 (pin 3)
+    
+    // set baud rate
+    Serial.begin(9600);
+    
+    // initialize motor, see DualMC33926MotorShield.cpp for details 
+    md.init();    
+    
+    // turn the PID on
+    myPID.SetMode(AUTOMATIC);  
+    myPID.SetSampleTime(1);
+    myPID.SetOutputLimits(-400,0);
+}
+
+////////////////////////////// Main Loop //////////////////////////////
+
+// main loop routine runs over and over again forever
+void loop() {
+  
+    // CHECK SERIAL FOR NEW INFO
+    if (Serial.available()>0){       // check to see if a character is available
+      content = ""; 
+      delay(20);
+      while(Serial.available()) {    // while there are still characters to read
+        character = Serial.read();   // read the first character
+        content.concat(character);   // add it to content string
+      }
+      newinfo = true;                     // set flag to say there is a new command
+      Serial.print("Command entered: ");  // print command to serial monitor
+      Serial.println(content);
+    }
+      
+    // NEW COMMAND: SET
+    // set motor speed (rpm) and test length (seconds)
+    if ((content.substring(0,3) == "set") && (newinfo == true)) {
+      spaceIndex = content.indexOf(' ',4);
+      testspeedChar = content.substring(4, spaceIndex);
+      testtimeChar = content.substring(spaceIndex+1, content.length());
+      testspeed = testspeedChar.toFloat();
+      testtime = testtimeChar.toFloat();
+      speeddiff = testspeed;
+      newinfo = false;
+      Serial.print("Motor speed set to ");
+      Serial.print(testspeed);
+      Serial.println(" rpm."); 
+      Serial.print("Test length set to ");
+      Serial.print(testtime);
+      Serial.println(" seconds."); 
+      Serial.println(" "); 
+    }
+      
+    // NEW COMMAND: RUN
+    // start a test with the current settings
+    if ((content.substring(0,3) == "run") && (newinfo == true)) {
+      Serial.println("Test starting.");
+      Serial.println(" ");
+      run = true;
+      newinfo = false;
+      starttime = millis();
+      countstarttime = millis();
+    }
+      
+    // NEW COMMAND: END
+    // emergency stop
+    if ((content.substring(0,3) == "end") && (newinfo == true)) {
+      nowtime_s = testtime+1.0;
+      newinfo = false;
+      Serial.println("E-stop sent, test ending early.");
+    }
+        
+    // MID-TEST CALCULATIONS
+    if (run == true) {   
+      
+      // find current time
+      nowtime_ms = (millis() - starttime);
+      nowtime_s = nowtime_ms / 1000.0;
+    
+      // if the motor shaft has made a partial rotation
+      if (count <= -128) {
+        rottime = millis() - countstarttime;              // find period of motion
+        nowspeed = 937.5 * abs(count) / 18.75 / rottime;   // find current rpm
+        
+        // save speed to array
+        if (nowtime_s > (testtime*arraynum/arraysize)) {
+          savespeed[arraynum] = (int)nowspeed;
+          savesecs[arraynum] = (int)nowtime_s;
+          savemillis[arraynum] = (int)nowtime_ms%1000;
+          arraynum = arraynum + 1;
+        }
+              
+        count = 0;                                    // reset count
+        countstarttime = millis();                    // reset count time   
+      }
+    }
+      
+    // IF A TEST IS IN PROGRESS, COMMAND MOTOR
+    if ((run == true) && (nowtime_s <= testtime)) {
+      myPID.Compute();
+      md.setM1Speed((int)(voltage));
+      stopIfFault();
+    }
+     
+    // IF A TEST IS DONE, STOP MOTOR
+    // stop the motor and reset all the variables
+    if ((run == true) && (nowtime_s >= testtime)) {
+      // motor running against brush
+      if (voltage > 0) {
+        for (; voltage > 0; voltage--) {
+            md.setM1Speed(voltage);
+            stopIfFault();
+            delay(2);
+        }
+      }
+      // motor running with brush
+      else if (voltage < 0) {
+        for (; voltage < 0; voltage++) {
+            md.setM1Speed(voltage);
+            stopIfFault();
+            delay(2);
+        }
+      }
+      else {
+      }
+      Serial.println("Test completed.");
+      Serial.println(" ");
+      Serial.println("DataPoint# Time(s) Time(ms) Speed(rpm)");
+      for (int k = 0; k <= arraysize; k++) {
+        Serial.print(k);
+        Serial.print(" ");
+        Serial.print(savesecs[k]);
+        Serial.print(" ");
+        Serial.print(savemillis[k]);
+        Serial.print(" ");
+        Serial.println(savespeed[k]);
+      }
+      Serial.println(" ");
+      run = false;
+
+        
+    }
+    
+  }
+  
+////////////////////////////// Functions //////////////////////////////
+
+void stopIfFault()
+{
+  if (md.getFault())
+  {
+    Serial.println("fault");
+  }
+}
+
+void doEncoderA(){
+
+  // look for a low-to-high on channel A
+  if (digitalRead(encoder0PinA) == HIGH) { 
+    // check channel B to see which way encoder is turning
+    if (digitalRead(encoder0PinB) == LOW) {  
+      count = count + 1;         // CW
+    } 
+    else {
+      count = count - 1;         // CCW (desired)
+    }
+  }
+  else   // must be a high-to-low edge on channel A                                       
+  { 
+    // check channel B to see which way encoder is turning  
+    if (digitalRead(encoder0PinB) == HIGH) {   
+      count = count + 1;          // CW
+    } 
+    else {
+      count = count - 1;          // CCW (desired)
+    }
+  }
+}
+
+void doEncoderB(){
+
+  // look for a low-to-high on channel B
+  if (digitalRead(encoder0PinB) == HIGH) {   
+   // check channel A to see which way encoder is turning
+    if (digitalRead(encoder0PinA) == HIGH) {  
+      count = count + 1;         // CW
+    } 
+    else {
+      count = count - 1;         // CCW (desired)
+    }
+  }
+  // Look for a high-to-low on channel B
+  else { 
+    // check channel B to see which way encoder is turning  
+    if (digitalRead(encoder0PinA) == LOW) {   
+      count = count + 1;          // CW
+    } 
+    else {
+      count = count - 1;          // CCW (desired)
+    }
+  }
+}
